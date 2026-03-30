@@ -1,0 +1,34 @@
+From: Raz <peterc3.dev@gmail.com>
+Subject: [PATCH] Add gfx1150 (RDNA 3.5 / Strix Point) to CK legacy whitelist
+
+MIOpen's CK solver applicability checks gate on device whitelists.
+gfx1150 is missing from the legacy CK whitelist (legacy_ck_common.hpp),
+blocking the legacy CK dlops convolution solver on Strix Point APUs.
+
+This patch adds gfx1150 to the legacy whitelist, consistent with
+gfx1100/1101/1102 (RDNA 3) and gfx1200/1201 (RDNA 4) already being listed.
+
+Note: The modern CK whitelist (ck_utility_common.hpp) should also include
+gfx1150, but CK device code currently crashes on gfx1150 with
+HIP StatCO assertion failures (same class as the Winograd ISA errors).
+This requires upstream CK codegen fixes before enabling.
+
+Tested on: AMD Ryzen AI 9 HX 370 (Strix Point, gfx1150 iGPU)
+ROCm: 7.2.0, CK: 7.2.0
+
+---
+ src/include/miopen/solver/legacy_ck_common.hpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/include/miopen/solver/legacy_ck_common.hpp b/src/include/miopen/solver/legacy_ck_common.hpp
+index 507220e..a3ac443 100644
+--- a/src/include/miopen/solver/legacy_ck_common.hpp
++++ b/src/include/miopen/solver/legacy_ck_common.hpp
+@@ -55,6 +55,7 @@ static inline bool is_ck_supported_hardware(const Handle& handle)
+            StartsWith(handle.GetDeviceName(), "gfx1100") ||
+            StartsWith(handle.GetDeviceName(), "gfx1101") ||
+            StartsWith(handle.GetDeviceName(), "gfx1102") ||
++           StartsWith(handle.GetDeviceName(), "gfx1150") ||
+            StartsWith(handle.GetDeviceName(), "gfx1200") ||
+            StartsWith(handle.GetDeviceName(), "gfx1201");
+ }

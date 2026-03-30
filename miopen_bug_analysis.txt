@@ -1,0 +1,122 @@
+MIOpen gfx1150 (RDNA 3.5 / Strix Point) Bug Analysis
+=====================================================
+
+Date: 2026-03-30
+Researcher: CIN Infrastructure / Raz (Peterc3-dev)
+MIOpen version: HEAD (cloned 2026-03-30)
+
+1. PROBLEM SUMMARY
+------------------
+MIOpen's Gemm convolution solvers request workspace (typically 158MB for im2col)
+but PyTorch/ROCm passes workspace_size=0. On gfx1150, this is catastrophic because
+unlike gfx1100, all alternative solver paths are also blocked.
+
+Training either:
+  - Falls back to CPU silently
+  - Uses O(N^5) naive Direct solvers (extremely slow)
+  - Crashes with "Not enough workspace for GemmBwdRest"
+
+Current workaround: MIOPEN_DEBUG_CONV_GEMM=0 (disables Gemm solvers entirely)
+
+2. ROOT CAUSE: THREE INDEPENDENT GATING MECHANISMS
+---------------------------------------------------
+
+Gate 1: Modern CK Whitelist (ck_utility_common.hpp:42-46)
+  Only allows MI-series GPUs:
+    gfx908 (MI100), gfx90a (MI200), gfx942 (MI300), gfx950
+  Blocks ALL RDNA GPUs including gfx1100!
+  14 CK convolution solvers affected (fwd/bwd/wrw, grouped, 3D variants)
+  NOTE: The file itself has a TODO comment saying this should "probably always
+  return true" since CK does its own device checking.
+
+Gate 2: Legacy CK Whitelist (legacy_ck_common.hpp:44-59)
+  Includes gfx1100, gfx1101, gfx1102 (RDNA 3) and gfx1200, gfx1201 (RDNA 4)
+  but SKIPS the entire gfx115x (RDNA 3.5) family.
+  Affects: conv_ck_igemm_fwd_v6r1_dlops_nchw solver
+
+Gate 3: Winograd Fury Exclusion (conv_wino_fury_RxS.cpp:258-264)
+  Explicitly excludes StartsWith(dev_name, "gfx115") because gfx1151 causes
+  "Illegal opcode in command stream" / HSA_STATUS_ERROR_INVALID_ISA errors.
+  This is a REAL ISA issue, not a whitelist oversight.
+
+Additional: Gemm Workspace Bug (PyTorch-side)
+  gemm_bwd.cpp:286 and gemm_wrw.cpp:434 check:
+    if((workspace_req > 0 && workspace == nullptr) || workspace_size < workspace_req)
+  PyTorch's ATen layer uses legacy MIOpen Find1 API and doesn't allocate workspace.
+  MIOpen's own Find2 API (problem.cpp:506) correctly calls GetWorkSpaceSize() and
+  allocates via handle.Create(). The bug is in PyTorch, not MIOpen.
+
+3. SOLVER AVAILABILITY MATRIX
+-----------------------------
+Solver Category              | gfx1100 | gfx1150 | Gate
+-----------------------------|---------|---------|-----
+Modern CK (14 solvers)       |  NO(!)  |   NO    | ck_utility_common.hpp
+Legacy CK (dlops)            |   YES   |   NO    | legacy_ck_common.hpp
+Winograd Fury                |   YES   |   NO    | conv_wino_fury_RxS.cpp
+Gemm (rocBLAS)               |   YES   | BROKEN  | workspace=0 from PyTorch
+ASM Implicit Gemm            |   NO    |   NO    | gfx908-only
+Direct (various)             |   YES   |   YES   | Works but slow
+
+4. COMPOSABLE KERNEL STATUS
+----------------------------
+CK (github.com/ROCm/composable_kernel) changelog shows:
+  - gfx1153 support added in unreleased 1.3.0
+  - WMMA (gfx12) support for FMHA in 1.2.0
+  - Active gfx115x bringup mentioned in hidden-arsenal-amd.pdf
+
+gfx1150 and gfx1153 are both RDNA 3.5 ISA targets. If CK works for gfx1153,
+it should work for gfx1150 (same compute unit architecture, different SKU).
+
+5. THE FIX (Option C: Aggressive CK enablement)
+-------------------------------------------------
+Patch 1: ck_utility_common.hpp
+  Add gfx1150 to modern CK whitelist. This enables 14 CK convolution solvers
+  that aren't available on ANY RDNA GPU today. Since CK already has gfx1153
+  support, gfx1150 (same ISA class) should work.
+
+Patch 2: legacy_ck_common.hpp
+  Add gfx1150 to legacy CK whitelist. Consistent with gfx1100-1102 and
+  gfx1200-1201 already being listed.
+
+Patch 3: conv_wino_fury_RxS.cpp
+  NO CHANGE. The Winograd exclusion is based on real ISA errors, not oversight.
+
+Patch 4: (Documentation only)
+  The workspace=0 bug is in PyTorch/ATen, not MIOpen. File separately against
+  pytorch/pytorch with ROCm label.
+
+6. BUILD INSTRUCTIONS
+---------------------
+cd ~/builds/miopen-gfx1150
+# Apply patches (already applied in this fork)
+mkdir build && cd build
+cmake .. -G Ninja \
+  -DCMAKE_INSTALL_PREFIX=/opt/miopen-gfx1150 \
+  -DMIOPEN_BACKEND=HIP \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGPU_TARGETS="gfx1150" \
+  -DMIOPEN_USE_COMPOSABLEKERNEL=ON
+ninja -j12
+
+7. TESTING
+----------
+After installing, point PyTorch at the patched MIOpen:
+  export MIOPEN_SYSTEM_DB_PATH=/opt/miopen-gfx1150/share/miopen/db
+  export LD_LIBRARY_PATH=/opt/miopen-gfx1150/lib:$LD_LIBRARY_PATH
+
+Test WITHOUT any MIOPEN_DEBUG_CONV_* workarounds:
+  python -c "
+  import torch
+  torch.backends.cudnn.benchmark = True
+  x = torch.randn(1, 64, 128, device='cuda')
+  conv = torch.nn.Conv1d(64, 128, 7, padding=3).cuda()
+  y = conv(x)
+  y.sum().backward()
+  print('Backward pass succeeded!')
+  "
+
+8. UPSTREAM STATUS
+------------------
+CK gfx1153: Added in CK 1.3.0 (unreleased, develop_deprecated branch)
+MIOpen gfx1150: Not tested, not in any whitelist
+PyTorch workspace: Known issue (affects all targets, masked on gfx1100 by Winograd)
