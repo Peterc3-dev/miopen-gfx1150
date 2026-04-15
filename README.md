@@ -91,3 +91,11 @@ Build verified: 377/377 targets, 0 failures, libMIOpen.so = 787MB.
 - AMD Ryzen AI 9 HX 370 (Strix Point)
 - Radeon 890M iGPU (gfx1150, RDNA 3.5)
 - ROCm 7.2.0, CK 7.2.0, CachyOS Linux 6.19
+
+## In-the-Wild Reproducers
+
+Real-world production workloads that hit the bugs documented above, with measurements:
+
+- [**2026-04-15 — OmniVoice voice cloning (bug #3)**](reproducers/2026-04-15-omnivoice-gfx1150.md) — k2-fsa/OmniVoice diffusion TTS generating a 20-second voice clone on a 6-second reference. The `GemmFwdRest` workspace=0 fallback fires 40+ times per generation with workspace requests up to 424 MB. `MIOPEN_FIND_MODE=FAST` workaround produces a sustained **3.5× speedup** (2m 52s → 49s) with zero quality loss. Second production-shaped reproducer on gfx1150/gfx1151-class hardware after TimLawrenz's NanoDiT training observations on gfx1151 Strix Halo.
+
+If you're running into these bugs on gfx1150 and your workload looks different from the ones above, contributions welcome — open a PR with a new `reproducers/YYYY-MM-DD-<workload>.md` file.
