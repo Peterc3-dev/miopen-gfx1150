@@ -1,0 +1,12 @@
+# Build output (MIOpen built out-of-tree per README)
+build/
+*.so
+*.o
+*.a
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
